@@ -1,5 +1,4 @@
 use crate::logger::Logger;
-use crate::simple_temp_dir::SimpleTempDir;
 use fs_extra::dir;
 use std::sync::OnceLock;
 use zed_extension_api::{self as zed, DownloadedFileType, GithubReleaseOptions};
@@ -25,7 +24,7 @@ impl Default for BinaryManager {
 }
 
 impl BinaryManager {
-    const GITHUB_OWNER: &str = "qwadrox";
+    const GITHUB_OWNER: &str = "Samsung";
     const GITHUB_REPO: &str = "netcoredbg";
 
     pub fn new() -> Self {
@@ -45,7 +44,7 @@ impl BinaryManager {
     /// Determines the appropriate asset name for the current platform
     /// Supported assets:
     /// - netcoredbg-linux-amd64.tar.gz
-    /// - netcoredbg-linux-arm64.tar.gz  
+    /// - netcoredbg-linux-arm64.tar.gz
     /// - netcoredbg-osx-amd64.tar.gz
     /// - netcoredbg-osx-arm64.tar.gz
     /// - netcoredbg-win64.zip
@@ -83,7 +82,6 @@ impl BinaryManager {
         .map_err(|e| format!("Failed to fetch latest release: {}", e))?;
 
         let asset_name = Self::get_platform_asset_name()?;
-
         let asset = release
             .assets
             .iter()
@@ -102,9 +100,30 @@ impl BinaryManager {
         })
     }
 
-    /// Creates a temporary directory for extraction
-    fn create_temp_dir(&self, version: &str) -> Result<SimpleTempDir, String> {
-        SimpleTempDir::new(&format!("netcoredbg_v{}_", version))
+    fn install_root_dir() -> std::path::PathBuf {
+        std::path::PathBuf::from("downloads").join("netcoredbg")
+    }
+
+    fn version_dir(version: &str) -> std::path::PathBuf {
+        Self::install_root_dir().join(version)
+    }
+
+    fn temp_dir(version: &str) -> std::path::PathBuf {
+        Self::install_root_dir().join("tmp").join(version)
+    }
+
+    fn ensure_directory(path: &std::path::Path) -> Result<(), String> {
+        std::fs::create_dir_all(path)
+            .map_err(|e| format!("Failed to create directory {}: {}", path.display(), e))
+    }
+
+    fn remove_directory_if_exists(path: &std::path::Path) -> Result<(), String> {
+        if path.exists() {
+            std::fs::remove_dir_all(path)
+                .map_err(|e| format!("Failed to remove directory {}: {}", path.display(), e))?;
+        }
+
+        Ok(())
     }
 
     /// Downloads and extracts the netcoredbg binary, returning the path to the executable
@@ -120,29 +139,31 @@ impl BinaryManager {
             return Err(format!("Unsupported file type for asset: {}", asset_name));
         };
 
-        // Version-specific directory in current working directory
-        let version_dir = std::path::PathBuf::from(format!("netcoredbg_v{}", version.tag_name));
+        let version_dir = Self::version_dir(&version.tag_name);
+        let temp_dir = Self::temp_dir(&version.tag_name);
 
-        let temp_dir = self.create_temp_dir(&version.tag_name)?;
+        Self::ensure_directory(&Self::install_root_dir())?;
+        Self::remove_directory_if_exists(&temp_dir)?;
+        Self::ensure_directory(&temp_dir)?;
+        Self::remove_directory_if_exists(&version_dir)?;
+        Self::ensure_directory(&version_dir)?;
+
         Logger::debug(&format!(
-            "Created secure temp directory: {}",
-            temp_dir.path().display()
+            "Downloading netcoredbg {} into extension temp directory: {}",
+            version.tag_name,
+            temp_dir.display()
         ));
 
         zed::download_file(
             &version.download_url,
-            &temp_dir.path().to_string_lossy(),
+            &temp_dir.to_string_lossy(),
             file_type,
         )
         .map_err(|e| format!("Failed to download netcoredbg: {}", e))?;
 
-        std::fs::create_dir_all(&version_dir)
-            .map_err(|e| format!("Failed to create version directory: {}", e))?;
-
-        self.copy_extracted_content(temp_dir.path(), &version_dir)?;
+        self.copy_extracted_content(&temp_dir, &version_dir)?;
 
         let exe_name = Self::get_executable_name();
-
         let binary_path = version_dir.join(exe_name);
 
         if !binary_path.exists() {
@@ -155,10 +176,9 @@ impl BinaryManager {
         zed::make_file_executable(&binary_path.to_string_lossy())
             .map_err(|e| format!("Failed to make file executable: {}", e))?;
 
-        let current_dir = std::env::current_dir()
-            .map_err(|e| format!("Failed to get current directory: {}", e))?;
-        let absolute_path = current_dir.join(&binary_path);
-        Ok(absolute_path.to_string_lossy().to_string())
+        Self::remove_directory_if_exists(&temp_dir)?;
+
+        Ok(binary_path.to_string_lossy().to_string())
     }
 
     /// Copies extracted content from temp_dir into version_dir, handling nested directory structure
@@ -254,8 +274,7 @@ impl BinaryManager {
         let version = self.fetch_latest_release()?;
         Logger::debug(&format!("Found latest version: {}", version.tag_name));
 
-        // Version-specific directory in current working directory
-        let version_dir = std::path::PathBuf::from(format!("netcoredbg_v{}", version.tag_name));
+        let version_dir = Self::version_dir(&version.tag_name);
         let exe_name = Self::get_executable_name();
         let existing_binary_path = version_dir.join(exe_name);
         if existing_binary_path.exists() {
@@ -263,10 +282,7 @@ impl BinaryManager {
                 "Found existing binary on disk: {}",
                 existing_binary_path.display()
             ));
-            let current_dir = std::env::current_dir()
-                .map_err(|e| format!("Failed to get current directory: {}", e))?;
-            let absolute_path = current_dir.join(&existing_binary_path);
-            let path_str = absolute_path.to_string_lossy().to_string();
+            let path_str = existing_binary_path.to_string_lossy().to_string();
             let _ = self.cached_binary_path.set(path_str.clone());
             return Ok(path_str);
         }

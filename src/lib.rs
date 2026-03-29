@@ -1,6 +1,5 @@
 mod binary_manager;
 mod logger;
-mod simple_temp_dir;
 
 use binary_manager::BinaryManager;
 use serde::{Deserialize, Serialize};
